@@ -134,4 +134,4 @@ credentials or production configuration dumps.
 
 ## License
 
-MIT. Copyright (c) 2026 PHP2Shell Checker contributors.
+MIT. Copyright (c) 2026 toxy4ny with Love.
