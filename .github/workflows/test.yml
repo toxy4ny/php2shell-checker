@@ -1,0 +1,19 @@
+name: Tests
+on: [push, pull_request, workflow_dispatch]
+permissions:
+  contents: read
+jobs:
+  debian:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        release: [bookworm, trixie]
+    container: debian:${{ matrix.release }}-slim
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install test dependencies
+        run: apt-get update && apt-get install -y --no-install-recommends python3 php-cli
+      - name: Unit and dpkg integration tests
+        run: python3 -m unittest discover -s tests -v
+      - name: Installed PHP smoke test
+        run: python3 tests/smoke.py

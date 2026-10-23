@@ -1,0 +1,13 @@
+stages: [test]
+debian:
+  stage: test
+  image: debian:${RELEASE}-slim
+  parallel:
+    matrix:
+      - RELEASE: [bookworm, trixie]
+  before_script:
+    - apt-get update
+    - apt-get install -y --no-install-recommends python3 php-cli
+  script:
+    - python3 -m unittest discover -s tests -v
+    - python3 tests/smoke.py
