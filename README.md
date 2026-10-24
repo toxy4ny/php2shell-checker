@@ -55,6 +55,28 @@ The default scan covers `/usr/bin`, `/usr/sbin`, `/usr/lib/cgi-bin`,
 PHP-FPM, CGI, LiteSpeed PHP, FrankenPHP and Apache module filenames. Directory
 symlinks are not traversed; pass their target directories explicitly.
 
+## Using with AI agents
+
+The repository includes an agent skill at [SKILL.md](SKILL.md), named
+`php2shell-checker`. It guides an agent through running the checker on the intended
+Debian 12/13 host and interpreting per-CVE results, process evidence, JSON errors
+and incomplete coverage. It can also interpret an existing JSON report.
+
+Keep the repository folder together when registering it with an agent's skill
+loader: `SKILL.md` uses the adjacent `check-php2shell.py` and
+`docs/report-format.md`. Copying only `SKILL.md` does not include the checker.
+Registration and skill discovery depend on the agent application. An agent with
+repository access can also follow the file directly, for example:
+
+> Read SKILL.md in this checkout and use it to audit this Debian server with
+> check-php2shell.py. Explain the per-CVE results, required updates, restart
+> evidence and unresolved findings. Keep this task read-only.
+
+The agent needs access to the target host; a local scan does not inspect a remote
+server. The skill preserves `UNKNOWN` and `REVIEW` findings, including v0.2.0's
+expected overall exit code 2, and does not treat `FIXED` as a whole-host safety
+verdict. It does not authorize exploit probes or automatic remediation.
+
 ## Reading the report
 
 | Status | Meaning |
