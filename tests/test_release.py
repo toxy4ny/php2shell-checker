@@ -19,9 +19,10 @@ class ReportTests(unittest.TestCase):
                 contextlib.redirect_stdout(output):
             self.assertEqual(a.main(['--format', 'json']), 2)
         result = json.loads(output.getvalue())
-        self.assertEqual(result['schema_version'], '1.0')
+        self.assertEqual(result['schema_version'], '1.1')
         self.assertEqual(result['errors'], ['fixture failure'])
         self.assertEqual(result['summary']['exit_code'], 2)
+        self.assertIsNone(result['brotli'])
 
     def test_cve_rules_are_independent(self):
         rule = dict(a.CVE_RULES['CVE-2026-109619'])

@@ -14,8 +14,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install test dependencies
-        run: apt-get update && apt-get install -y --no-install-recommends python3 php-cli
+        run: apt-get update && apt-get install -y --no-install-recommends python3 php-cli brotli libbrotli1 libbrotli-dev python3-brotli
       - name: Unit and dpkg integration tests
         run: python3 -m unittest discover -s tests -v
-      - name: Installed PHP smoke test
+      - name: Installed PHP and Brotli smoke test
         run: python3 tests/smoke.py

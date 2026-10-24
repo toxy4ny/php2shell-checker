@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.3.0 — 2026-10-23
+
+- Add a separate Brotli dpkg package assessment for CVE-2026-111497 on Debian 12/13,
+  including installed/candidate findings, holds and eligible upgrade suggestions.
+- Record exact known affected Debian source versions and mapped upstream fixes.
+  No Debian fixed version is invented; unknown revisions/backports remain unknown.
+- Extend JSON to schema 1.1 with `brotli`, its per-CVE aggregate and independent
+  summary code. PHP package records/counts remain separate; overall update findings
+  and suggested upgrade commands include both components. Empty Brotli inventory
+  reports `NOT_INSTALLED`, with custom/embedded copies explicitly outside scope.
+- Keep application reachability and loaded Brotli libraries explicitly unchecked.
+  PHP process checks do not certify Brotli remediation or application safety.
+- Update the agent skill, README and report contract; add Brotli regression tests
+  and installed-package smoke coverage on both Debian releases in GitHub CI.
+- Completed scans continue to exit 2 due to the unresolved PHP supplemental notice.
+
 ## 0.2.0 — 2026-10-23
 
 - Report installed-package and APT candidate findings separately for CVE-2026-109618

@@ -15,7 +15,7 @@ debian:
       - RELEASE: [bookworm, trixie]
   before_script:
     - apt-get update
-    - apt-get install -y --no-install-recommends python3 php-cli
+    - apt-get install -y --no-install-recommends python3 php-cli brotli libbrotli1 libbrotli-dev python3-brotli
   script:
     - python3 -m unittest discover -s tests -v
     - python3 tests/smoke.py

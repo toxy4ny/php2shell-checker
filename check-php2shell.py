@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Read-only PHP2Shell package audit for Debian 12/13; Python 3 standard library.
+"""Read-only PHP2Shell and Brotli audit for Debian 12/13; Python 3 standard library.
 
 Rules verified 2026-10-23:
 https://security-tracker.debian.org/tracker/CVE-2026-109618
 https://security-tracker.debian.org/tracker/CVE-2026-109619
+https://security-tracker.debian.org/tracker/CVE-2026-111497
 https://www.php.net/archive/2026.php
 
 Exit codes: 0 = no action found within scope; 1 = update/restart required;
@@ -33,9 +34,15 @@ RUNTIME_NAME = re.compile(
 CORE_BINARY = re.compile(r"^(?:php\d+(?:\.\d+)?-(?:cli|fpm|cgi|common)|"
                          r"libapache2-mod-php\d+(?:\.\d+)?|libphp\d.*-embed)$")
 ENV = dict(os.environ, LC_ALL="C", LANG="C")
-VERSION = "0.2.0"
-SCHEMA_VERSION = "1.0"
+VERSION = "0.3.0"
+SCHEMA_VERSION = "1.1"
 RULES_DATE = "2026-10-23"
+BROTLI_CVE = 'CVE-2026-111497'
+BROTLI_REFERENCE = 'https://security-tracker.debian.org/tracker/' + BROTLI_CVE
+BROTLI_FIXED = {'1.0': '1.0.10', '1.1': '1.1.1', '1.2': '1.2.1'}
+# Exact source versions recorded by Debian, not a guessed future Debian fix.
+BROTLI_AFFECTED = {'12': '1.0.9-2', '13': '1.1.0-2'}
+BROTLI_BINARY = re.compile(r'^(?:brotli|libbrotli\d+|libbrotli-dev|python3-brotli)$')
 CVE_RULES = {
     cve: {"upstream": dict(FIXED), "debian": dict(DEBIAN_FIXED),
           "reference": "https://security-tracker.debian.org/tracker/" + cve}
@@ -99,6 +106,25 @@ def classify(source, version, cve="CVE-2026-109618"):
     return "UNKNOWN", "below " + rule["upstream"][branch] + "; vendor backport not verified"
 
 
+def is_brotli_package(name, source):
+    return source == 'brotli' or bool(BROTLI_BINARY.fullmatch(name.split(':')[0]))
+
+
+def classify_brotli(source, version, release):
+    """Assess source version metadata; never infer reachability or vendor backports."""
+    if source != 'brotli':
+        return 'UNKNOWN', 'Brotli binary name has an unrecognized source package'
+    if re.fullmatch(re.escape(BROTLI_AFFECTED[release]) + r'(?:\+b\d+)?', version):
+        return 'UPDATE', ('source version listed as affected by Debian; no Debian fixed '
+                          'version recorded in embedded rules')
+    upstream = version.split(':', 1)[-1].rsplit('-', 1)[0]
+    match = re.fullmatch(r'(1\.[012])\.\d+', upstream)
+    if match and ge(upstream, BROTLI_FIXED[match[1]]):
+        return 'FIXED', 'upstream Brotli version >= ' + BROTLI_FIXED[match[1]]
+    return 'UNKNOWN', ('no verified fix for this build; consult the vendor for backports '
+                       'or unmapped/prerelease versions')
+
+
 def inventory():
     fmt = "${db:Status-Status}\t${binary:Package}\t${Version}\t${source:Package}\t${source:Version}\n"
     result = run(["dpkg-query", "-W", "-f=" + fmt])
@@ -115,7 +141,7 @@ def inventory():
         source = source or name.split(":")[0]
         source_version = source_version or version
         bare = name.split(":")[0]
-        if CORE_SOURCE.fullmatch(source) or CORE_BINARY.fullmatch(bare):
+        if CORE_SOURCE.fullmatch(source) or CORE_BINARY.fullmatch(bare) or is_brotli_package(name, source):
             rows.append((state, name, version, source, source_version))
     return sorted(rows, key=lambda row: (row[3], row[1]))
 
@@ -322,6 +348,47 @@ def aggregate_status(statuses):
     return 'FIXED'
 
 
+def brotli_report(rows, available, holds, release):
+    packages, recommended = [], []
+    for state, name, version, source, source_version in rows:
+        status, reason = classify_brotli(source, source_version, release)
+        if state != 'installed':
+            status, reason = 'UNKNOWN', 'incomplete dpkg installation: ' + state
+        held = name in holds or name.split(':')[0] in holds
+        candidate = available[name]
+        candidate_findings = {}
+        if candidate != '(none)':
+            candidate_status, candidate_reason = classify_brotli(source, candidate, release)
+            candidate_findings[BROTLI_CVE] = {'status': candidate_status,
+                                             'reason': candidate_reason,
+                                             'reference': BROTLI_REFERENCE}
+            if (status != 'FIXED' and not held and candidate_status == 'FIXED' and
+                    candidate != version and ge(candidate, version)):
+                recommended.append(name)
+        packages.append({'name': name, 'installed_version': version, 'source_package': source,
+                         'source_version': source_version, 'dpkg_state': state, 'held': held,
+                         'status': status,
+                         'cves': {BROTLI_CVE: {'status': status, 'reason': reason,
+                                              'reference': BROTLI_REFERENCE}},
+                         'candidate': {'version': None if candidate == '(none)' else candidate,
+                                       'cves': candidate_findings}})
+    counts = {s: sum(p['status'] == s for p in packages) for s in ('FIXED', 'UPDATE', 'UNKNOWN')}
+    status = aggregate_status(p['status'] for p in packages) if packages else 'NOT_INSTALLED'
+    code = 2 if counts['UNKNOWN'] else 1 if counts['UPDATE'] else 0
+    return {'cve': BROTLI_CVE, 'status': status, 'scope': 'dpkg_brotli_source_packages',
+            'packages': packages, 'counts': counts, 'exit_code': code,
+            'updates_required': bool(counts['UPDATE']), 'upgrade_packages': recommended,
+            'reference': BROTLI_REFERENCE, 'debian_fixed_version': None,
+            'known_affected_debian_version': BROTLI_AFFECTED[release],
+            'upstream_fixed_versions': dict(BROTLI_FIXED),
+            'reachability': 'NOT_CHECKED', 'loaded_libraries': 'NOT_CHECKED',
+            'embedded_copies': 'NOT_AUDITED',
+            'assessment': 'Package/source version metadata only; decoder use and exploitability '
+                          'in PHP/cURL, Node.js or other applications are not established. '
+                          'Custom, vendored and static copies are not inventoried. '
+                          'NOT_INSTALLED means no matching dpkg package, not no Brotli on the host.'}
+
+
 def collect_report(scan_roots):
     for executable in ('dpkg', 'dpkg-query', 'apt-cache', 'apt-mark'):
         if not shutil.which(executable):
@@ -333,12 +400,15 @@ def collect_report(scan_roots):
             system[key] = value.strip('"')
     if system.get('ID') != 'debian' or system.get('VERSION_ID') not in ('12', '13'):
         raise RuntimeError('This script supports Debian 12 and 13')
-    rows = inventory()
+    all_rows = inventory()
+    brotli_rows = [r for r in all_rows if is_brotli_package(r[1], r[3])]
+    rows = [r for r in all_rows if not is_brotli_package(r[1], r[3])]
     hold_result = run(['apt-mark', 'showhold'])
     if hold_result.returncode:
         raise RuntimeError('Could not list held packages')
     holds = set(hold_result.stdout.splitlines())
-    available = candidates([r[1] for r in rows]) if rows else {}
+    available = candidates([r[1] for r in all_rows]) if all_rows else {}
+    brotli = brotli_report(brotli_rows, available, holds, system['VERSION_ID'])
     packages, recommended = [], []
     for state, name, version, source, source_version in rows:
         findings = package_cves(source, source_version, state)
@@ -370,6 +440,8 @@ def collect_report(scan_roots):
                      'counts': {s: statuses.count(s) for s in ('FIXED', 'UPDATE', 'UNKNOWN')},
                      'reference': rule['reference']}
     cves[NOTICE['cve']] = {**NOTICE, 'scope': 'advisory_only'}
+    cves[BROTLI_CVE] = {key: brotli[key] for key in
+                       ('status', 'scope', 'counts', 'reference', 'reachability', 'assessment')}
     package_unknown = not packages or package_counts['UNKNOWN'] > 0 or bool(extra or scan_errors)
     package_exit = 2 if package_unknown else 1 if package_counts['UPDATE'] else 0
     restart_pids = [p['pid'] for p in processes['records'] if p['status'] == 'RESTART_REQUIRED']
@@ -377,13 +449,15 @@ def collect_report(scan_roots):
     process_exit = 2 if process_unknown else 1 if restart_pids else 0
     # The supplemental advisory is deliberately not declared resolved by version checks.
     review = [cve for cve, finding in cves.items() if finding['status'] == 'REVIEW']
-    exit_code = 2 if review or package_exit == 2 or process_exit == 2 else max(package_exit, process_exit)
+    component_codes = (package_exit, process_exit, brotli['exit_code'])
+    exit_code = 2 if review or 2 in component_codes else max(component_codes)
+    recommended.extend(brotli['upgrade_packages'])
     return {
         'schema_version': SCHEMA_VERSION, 'tool_version': VERSION,
         'generated_at': datetime.now(timezone.utc).isoformat(), 'rules_verified_at': RULES_DATE,
         'system': {'id': system['ID'], 'version': system['VERSION_ID'],
                    'name': system.get('PRETTY_NAME', 'Debian')},
-        'cves': cves, 'packages': packages, 'processes': processes,
+        'cves': cves, 'packages': packages, 'processes': processes, 'brotli': brotli,
         'coverage': {'scan_roots': roots, 'unassessed_runtimes': extra, 'scan_errors': scan_errors,
                      'configuration': 'NOT_CHECKED', 'application_code': 'NOT_CHECKED',
                      'containers_and_chroots': 'NOT_AUDITED', 'file_integrity': 'NOT_CHECKED',
@@ -394,7 +468,9 @@ def collect_report(scan_roots):
                     'upgrade_argv': ['sudo', 'apt-get', 'install', '--only-upgrade', *recommended] if recommended else []},
         'summary': {'package_counts': package_counts, 'package_exit_code': package_exit,
                     'process_exit_code': process_exit, 'review_required': review,
-                    'updates_required': bool(package_counts['UPDATE']),
+                    'brotli_exit_code': brotli['exit_code'],
+                    'brotli_updates_required': brotli['updates_required'],
+                    'updates_required': bool(package_counts['UPDATE']) or brotli['updates_required'],
                     'restart_required': bool(restart_pids), 'exit_code': exit_code},
         'errors': [],
     }
@@ -428,6 +504,21 @@ def render_text(report):
         for cve, finding in candidate['cves'].items():
             print(f"    {cve}: {finding['status']} — {finding['reason']}")
     print('\nPHP core package totals: ' + ', '.join(f'{s}={n}' for s, n in report['summary']['package_counts'].items()))
+    brotli = report['brotli']
+    print(f"\nBrotli / {BROTLI_CVE}: {brotli['status']}")
+    print('  ' + brotli['assessment'])
+    print('  Debian fixed version: not recorded in embedded rules; check the vendor advisory.')
+    for package in brotli['packages']:
+        finding = package['cves'][BROTLI_CVE]
+        print(f"  [{package['status']}] {package['name']} installed={package['installed_version']}" +
+              (' HOLD' if package['held'] else ''))
+        print('    ' + finding['reason'])
+        candidate = package['candidate']
+        print('    Candidate: ' + (candidate['version'] or 'unavailable'))
+        if candidate['cves']:
+            finding = candidate['cves'][BROTLI_CVE]
+            print(f"      {finding['status']} — {finding['reason']}")
+    print('  Brotli component exit code: ' + str(brotli['exit_code']))
     print('\nProcess scan: ' + report['processes']['status'])
     for process in report['processes']['records']:
         print(f"[{process['status']}] PID {process['pid']} {json.dumps(process['name'])} service={json.dumps(process['service'])}")
@@ -450,13 +541,14 @@ def render_text(report):
     print('Package status and restart findings remain actionable even when review is required.')
     print('FIXED applies only to the named CVE and package metadata, not running code or file integrity.')
     print('Process checks detect stale-file evidence, not runtime PHP versions or compromise.')
+    print('Brotli loaded libraries and affected applications are not checked by the PHP process scan.')
     print('Configuration, application code, containers and chroots are not audited.')
     print('Directory symlinks are not traversed; add target directories using --scan-root.')
     print('Restart affected PHP-FPM/Apache/long-running workers after updating. Holds are never removed.')
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description='Read-only PHP2Shell audit for Debian 12 and 13')
+    parser = argparse.ArgumentParser(description='Read-only PHP2Shell and Brotli audit for Debian 12 and 13')
     parser.add_argument('--version', action='version', version='%(prog)s ' + VERSION)
     parser.add_argument('--format', choices=('text', 'json'), default='text', help='output format (default: text)')
     parser.add_argument('--scan-root', action='append', default=[], metavar='DIR',
@@ -467,7 +559,7 @@ def main(argv=None):
     except (RuntimeError, OSError, UnicodeError) as exc:
         report = {'schema_version': SCHEMA_VERSION, 'tool_version': VERSION,
                   'generated_at': datetime.now(timezone.utc).isoformat(), 'rules_verified_at': RULES_DATE,
-                  'system': None, 'cves': {}, 'packages': [], 'processes': None,
+                  'system': None, 'cves': {}, 'packages': [], 'processes': None, 'brotli': None,
                   'coverage': None, 'actions': None, 'summary': {'exit_code': 2}, 'errors': [str(exc)]}
     if args.format == 'json':
         print(json.dumps(report, indent=2, ensure_ascii=True))
