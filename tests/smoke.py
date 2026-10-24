@@ -1,5 +1,6 @@
 """Exercise real dpkg/APT inventory with PHP installed; mirror patch state may vary."""
 from pathlib import Path
+import json
 import subprocess
 import sys
 
@@ -14,3 +15,25 @@ assert "PHP core package totals:" in result.stdout
 assert "Result:" in result.stdout
 assert "php8.2-cli  installed=" in result.stdout or "php8.4-cli  installed=" in result.stdout
 assert "Candidate:" in result.stdout
+
+worker = subprocess.Popen(['php', '-n', '-r', 'sleep(30);'])
+try:
+    structured = subprocess.run([sys.executable, str(root / "check-php2shell.py"), '--format', 'json'],
+                                capture_output=True, text=True)
+finally:
+    worker.terminate()
+    worker.wait(timeout=5)
+assert not structured.stderr, structured.stderr
+report = json.loads(structured.stdout)
+assert report['schema_version'] == '1.0'
+assert report['tool_version'] == '0.2.0'
+assert set(report['cves']) == {'CVE-2026-109618', 'CVE-2026-109619', 'CVE-2026-115560'}
+assert report['cves']['CVE-2026-115560']['status'] == 'REVIEW'
+assert report['packages']
+assert all(set(p['cves']) == {'CVE-2026-109618', 'CVE-2026-109619'} for p in report['packages'])
+assert report['processes']['status'] in ('NO_MATCHING_PROCESSES', 'NO_STALE_FILES_FOUND', 'UNKNOWN', 'RESTART_REQUIRED')
+assert structured.returncode == report['summary']['exit_code'] == 2
+assert report['summary']['review_required'] == ['CVE-2026-115560']
+assert any(p['pid'] == worker.pid and p['status'] == 'NO_STALE_FILES_FOUND'
+           for p in report['processes']['records']), report['processes']
+print('JSON report parsed and checked; overall exit 2 correctly preserves advisory review.')

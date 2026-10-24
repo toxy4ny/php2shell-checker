@@ -1,17 +1,19 @@
 #!/usr/bin/env python3
 """Read-only PHP2Shell package audit for Debian 12/13; Python 3 standard library.
 
-Rules verified 2026-10-22:
+Rules verified 2026-10-23:
 https://security-tracker.debian.org/tracker/CVE-2026-109618
 https://security-tracker.debian.org/tracker/CVE-2026-109619
 https://www.php.net/archive/2026.php
 
-Exit codes: 0 = all discovered PHP core packages meet fixed release thresholds;
-1 = packages requiring an update; 2 = unknown/incomplete audit (takes precedence).
+Exit codes: 0 = no action found within scope; 1 = update/restart required;
+2 = unknown, incomplete or advisory review required (takes precedence).
 No exit code certifies every website, container or running worker as patched.
 """
 
 import argparse
+from datetime import datetime, timezone
+import json
 import os
 from pathlib import Path
 import re
@@ -31,6 +33,30 @@ RUNTIME_NAME = re.compile(
 CORE_BINARY = re.compile(r"^(?:php\d+(?:\.\d+)?-(?:cli|fpm|cgi|common)|"
                          r"libapache2-mod-php\d+(?:\.\d+)?|libphp\d.*-embed)$")
 ENV = dict(os.environ, LC_ALL="C", LANG="C")
+VERSION = "0.2.0"
+SCHEMA_VERSION = "1.0"
+RULES_DATE = "2026-10-23"
+CVE_RULES = {
+    cve: {"upstream": dict(FIXED), "debian": dict(DEBIAN_FIXED),
+          "reference": "https://security-tracker.debian.org/tracker/" + cve}
+    for cve in ("CVE-2026-109618", "CVE-2026-109619")
+}
+NOTICE = {
+    "cve": "CVE-2026-115560", "status": "REVIEW", "date": "2026-10-23",
+    "reference": "https://www.php.net/archive/2026.php",
+    "reason": "PHP's session upload progress advisory requires configuration/application review; "
+              "no fixed-version threshold is encoded for this CVE.",
+    "conditions": ["session.upload_progress.enabled is enabled",
+                   "session.serialize_handler is configured as php_binary or php_serialize",
+                   "application code switches it to php with ini_set() before session_start()"],
+    "recommendation": "PHP recommends session.upload_progress.enabled=0 until the next regular "
+                      "bugfix release. Apply it before request parsing in the effective web SAPI "
+                      "configuration and restart affected workers. Do not rely on ini_set() or "
+                      "FPM .user.ini for this mitigation.",
+    "assessment": "Configuration and application code are not inspected. Enabled upload progress "
+                  "alone does not establish vulnerability. Original PHP2Shell fixes do not "
+                  "establish remediation of this separate advisory.",
+}
 
 
 def run(args):
@@ -48,12 +74,13 @@ def ge(a, b):
     return result.returncode == 0
 
 
-def classify(source, version):
+def classify(source, version, cve="CVE-2026-109618"):
     """Return status, explanation. Never infer a backport from a large epoch/revision."""
+    rule = CVE_RULES[cve]
     without_epoch = version.split(":", 1)[-1]
     upstream = without_epoch.rsplit("-", 1)[0]
     match = re.match(r"^(\d+\.\d+)\.\d+", upstream)
-    if not match or match[1] not in FIXED:
+    if not match or match[1] not in rule["upstream"]:
         return "UNKNOWN", "no rule for this branch; consult the vendor advisory"
     branch = match[1]
     if source != "php" + branch:
@@ -63,13 +90,13 @@ def classify(source, version):
     official_style = suite and re.fullmatch(
         r"\d+\.\d+\.\d+-\d+~deb" + suite + r"u\d+(?:\+b\d+)?", without_epoch)
     if official_style:
-        threshold = DEBIAN_FIXED[source]
+        threshold = rule["debian"][source]
         if ge(without_epoch, threshold):
             return "FIXED", "Debian package version >= " + threshold
         return "UPDATE", "Debian package version below " + threshold
-    if ge(upstream, FIXED[branch]):
-        return "FIXED", "upstream version >= " + FIXED[branch]
-    return "UNKNOWN", "below " + FIXED[branch] + "; vendor backport not verified"
+    if ge(upstream, rule["upstream"][branch]):
+        return "FIXED", "upstream version >= " + rule["upstream"][branch]
+    return "UNKNOWN", "below " + rule["upstream"][branch] + "; vendor backport not verified"
 
 
 def inventory():
@@ -140,103 +167,314 @@ def extra_runtimes(roots, audited_packages):
     return sorted(found), errors
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Read-only PHP2Shell package audit for Debian 12 and 13")
-    parser.add_argument("--scan-root", action="append", default=[], metavar="DIR",
-                        help="additional directory to search for unassessed PHP runtimes; repeatable")
-    args = parser.parse_args()
-    for executable in ("dpkg", "dpkg-query", "apt-cache", "apt-mark"):
-        if not shutil.which(executable):
-            raise RuntimeError("Missing command: " + executable + "; Debian 12 or 13 is required")
-    os_release = {}
-    for line in Path("/etc/os-release").read_text().splitlines():
-        if "=" in line:
-            key, value = line.split("=", 1)
-            os_release[key] = value.strip('"')
-    if os_release.get("ID") != "debian" or os_release.get("VERSION_ID") not in ("12", "13"):
-        raise RuntimeError("This script supports Debian 12 and 13")
-
-    print("PHP2Shell: CVE-2026-109618 / CVE-2026-109619")
-    print("System:", os_release.get("PRETTY_NAME", "Debian"))
-    print("Rules verified: 2026-10-22. Package-version audit; no exploit attempts.")
-    print("APT uses local indexes. Run sudo apt update separately to refresh candidate versions.")
-    print("FIXED = meets patched version threshold; UPDATE = update required; UNKNOWN = unverified.\n")
-    rows = inventory()
-    hold_result = run(["apt-mark", "showhold"])
-    if hold_result.returncode:
-        raise RuntimeError("Could not list held packages")
-    holds = set(hold_result.stdout.splitlines())
-    available = candidates([row[1] for row in rows]) if rows else {}
-    unknown, needs_update = not bool(rows), False
-    recommended = []
-    counts = {"FIXED": 0, "UPDATE": 0, "UNKNOWN": 0}
-    if not rows:
-        print("No PHP core packages found in dpkg. This does not prove PHP is absent from this host.")
-    for state, name, version, source, source_version in rows:
-        status, reason = classify(source, source_version)
-        if state != "installed":
-            status, reason = "UNKNOWN", "incomplete dpkg installation: " + state
-        counts[status] += 1
-        unknown |= status == "UNKNOWN"
-        needs_update |= status == "UPDATE"
-        held = name in holds or name.split(":")[0] in holds
-        print(f"[{status}] {name}  installed={version}" + ("  HOLD" if held else ""))
-        print(f"  {reason}; source={source} ({source_version})")
-        candidate = available[name]
-        if candidate == "(none)":
-            print("  Candidate: unavailable; check repositories and APT indexes.")
-        else:
-            candidate_status, candidate_reason = classify(source, candidate)
-            print(f"  Candidate: {candidate} [{candidate_status}] — {candidate_reason}")
-            if status != "FIXED" and candidate_status == "FIXED" and ge(candidate, version) and candidate != version:
-                if held:
-                    print("  A patched candidate is available, but HOLD blocks a normal update.")
-                else:
-                    recommended.append(name)
-            elif status != "FIXED":
-                print("  No automatically verified patched upgrade is available.")
-        if status != "FIXED" and source_version.split(":")[-1].startswith(("5.", "7.", "8.0.", "8.1.")):
-            print("  Legacy branch: obtain a verified vendor backport or migrate to supported PHP.")
-
-    roots = ["/usr/bin", "/usr/sbin", "/usr/lib/cgi-bin", "/usr/lib/apache2/modules",
-             "/usr/local", "/opt", *args.scan_root]
-    print("\nSearch for unassessed PHP runtimes:", ", ".join(roots))
-    extra, scan_errors = extra_runtimes(roots, {row[1].split(":")[0] for row in rows})
-    for root in args.scan_root:
-        if not os.path.isdir(root):
-            scan_errors.append("Requested scan root is not an accessible directory: " + root)
-    for path in extra:
-        print("[UNKNOWN] outside assessed PHP packages:", path)
-    for error in scan_errors:
-        print("[UNKNOWN] incomplete scan:", error)
-    unknown |= bool(extra or scan_errors)
-    if not extra and not scan_errors:
-        print("No unassessed PHP runtime with a recognized filename found in the scanned directories.")
-    print("Directory symlinks are not traversed; pass their target paths using --scan-root.")
-    print("\nPHP core package totals:", ", ".join(f"{key}={value}" for key, value in counts.items()))
-    if recommended:
-        print("\nAPT offers a patched candidate for these packages (commands NOT executed):")
-        print(shlex.join(["sudo", "apt-get", "-s", "install", "--only-upgrade", *recommended]))
-        print("After reviewing the simulated plan:")
-        print(shlex.join(["sudo", "apt-get", "install", "--only-upgrade", *recommended]))
-    if unknown:
-        print("\nResult: INCOMPLETE / UNKNOWN findings. PHP2Shell remediation cannot be confirmed.")
-    elif needs_update:
-        print("\nResult: PHP PACKAGE UPDATES REQUIRED.")
-    else:
-        print("\nResult: discovered PHP core packages meet patched version thresholds.")
-    print("\nScope and limitations:")
-    print("- Containers, chroots, custom/renamed builds and application code are not audited.")
-    print("- Third-party extensions have independent versions; these are not PHP engine versions.")
-    print("- FIXED refers to package metadata, not running processes or file integrity.")
-    print("- After updating, restart every affected PHP-FPM, Apache mod_php and long-running PHP worker.")
-    print("- Review why a package is held before removing HOLD; this script never removes holds.")
-    return 2 if unknown else 1 if needs_update else 0
+def process_identity(directory):
+    """Start time guards against PID reuse; comm can contain spaces/parentheses."""
+    fields = (directory / 'stat').read_text().rsplit(')', 1)[1].split()
+    return fields[19], fields[0]
 
 
-if __name__ == "__main__":
+def php_maps(text):
+    mappings = []
+    for line in text.splitlines():
+        fields = line.split(None, 5)
+        if len(fields) != 6:
+            continue
+        path = fields[5]
+        clean = path.removesuffix(' (deleted)')
+        if re.fullmatch(r'libphp[^/]*\.so(?:\.\d+)*', Path(clean).name):
+            mappings.append((path, fields[3], fields[4]))
+    return sorted(set(mappings))
+
+
+def inspect_process(directory, observer_ns):
+    """Read procfs metadata only. Never read environment, command arguments or memory."""
+    start, state = process_identity(directory)
+    if state in ('Z', 'X'):
+        return None
+    errors, evidence = [], []
+    comm = (directory / 'comm').read_text().strip()
+    executable = None
     try:
-        sys.exit(main())
-    except (RuntimeError, OSError) as exc:
-        print("ERROR: " + str(exc), file=sys.stderr)
-        sys.exit(2)
+        executable = os.readlink(directory / 'exe')
+    except FileNotFoundError:
+        # Kernel threads have no executable. Relevant userspace processes must not disappear silently.
+        pass
+    except OSError as exc:
+        errors.append('executable metadata unavailable: ' + str(exc))
+    try:
+        mappings = php_maps((directory / 'maps').read_text())
+    except OSError as exc:
+        mappings = []
+        errors.append('memory mapping metadata unavailable: ' + str(exc))
+    clean_exe = (executable or '').removesuffix(' (deleted)')
+    is_php = bool(RUNTIME_NAME.fullmatch(Path(clean_exe).name) or RUNTIME_NAME.fullmatch(comm))
+    is_apache = Path(clean_exe).name in ('apache2', 'httpd') or comm in ('apache2', 'httpd')
+    relevant = is_php or is_apache or bool(mappings)
+    if not relevant and not errors:
+        return None
+    if relevant and executable is None:
+        errors.append('executable unavailable for a recognized process')
+    same_namespace = False
+    if relevant:
+        try:
+            same_namespace = (observer_ns is not None and
+                              os.readlink(directory / 'ns/mnt') == observer_ns and
+                              os.path.samestat(os.stat(directory / 'root'), os.stat('/')))
+            if not same_namespace:
+                errors.append('different mount namespace or root; host package inventory does not apply')
+        except OSError as exc:
+            errors.append('process namespace/root unavailable: ' + str(exc))
+        # Only inspect Apache's executable when a PHP module is mapped.
+        if executable and (is_php or mappings):
+            if executable.endswith(' (deleted)'):
+                evidence.append({'type': 'deleted_executable', 'path': executable})
+            elif same_namespace:
+                try:
+                    running = os.stat(directory / 'exe')
+                    current = os.stat(directory / 'root' / clean_exe.lstrip('/'))
+                    if not os.path.samestat(running, current):
+                        evidence.append({'type': 'executable_inode_changed', 'path': clean_exe})
+                except OSError as exc:
+                    errors.append('cannot compare executable with disk: ' + str(exc))
+        for path, device, inode in mappings:
+            if path.endswith(' (deleted)'):
+                evidence.append({'type': 'deleted_php_mapping', 'path': path})
+            elif same_namespace:
+                try:
+                    current = os.stat(directory / 'root' / path.lstrip('/'))
+                    major, minor = (int(part, 16) for part in device.split(':'))
+                    if (current.st_ino != int(inode) or os.major(current.st_dev) != major or
+                            os.minor(current.st_dev) != minor):
+                        evidence.append({'type': 'php_mapping_inode_changed', 'path': path})
+                except (OSError, ValueError) as exc:
+                    errors.append('cannot compare PHP mapping with disk: ' + str(exc))
+    service = None
+    if relevant:
+        try:
+            units = re.findall(r'(?:^|/)([^/\n]+\.service)(?:/|$)',
+                               (directory / 'cgroup').read_text(), re.MULTILINE)
+            service = units[-1] if units else None
+        except OSError:
+            # Optional hint; missing cgroup metadata does not invalidate inode evidence.
+            pass
+    if process_identity(directory)[0] != start:
+        raise RuntimeError('PID was reused during inspection')
+    status = ('RESTART_REQUIRED' if evidence else 'UNKNOWN' if errors else
+              'NO_PHP_MAPPING' if is_apache and not is_php and not mappings else 'NO_STALE_FILES_FOUND')
+    return {'pid': int(directory.name), 'start_time_ticks': start, 'name': comm,
+            'executable': executable, 'service': service, 'status': status,
+            'evidence': evidence, 'errors': errors, 'recognized_runtime': relevant}
+
+
+def inspect_processes(proc_root=Path('/proc')):
+    records, errors, raced = [], [], 0
+    try:
+        directories = sorted((p for p in proc_root.iterdir() if p.name.isdigit()),
+                             key=lambda p: int(p.name))
+    except OSError as exc:
+        return {'status': 'UNKNOWN', 'records': [], 'errors': [str(exc)], 'vanished': 0}
+    try:
+        observer_ns = os.readlink(proc_root / 'self/ns/mnt')
+    except OSError as exc:
+        observer_ns = None
+        errors.append('observer mount namespace unavailable: ' + str(exc))
+    if os.geteuid() != 0:
+        errors.append('non-root scan: procfs permissions/hidepid may conceal processes; rerun with sudo')
+    for directory in directories:
+        if int(directory.name) == os.getpid():
+            continue
+        try:
+            record = inspect_process(directory, observer_ns)
+            if record:
+                records.append(record)
+        except (FileNotFoundError, ProcessLookupError):
+            if directory.exists():
+                errors.append('PID ' + directory.name + ': incomplete procfs metadata')
+            else:
+                raced += 1
+        except (OSError, RuntimeError, IndexError, ValueError) as exc:
+            errors.append('PID ' + directory.name + ': ' + str(exc))
+    if not directories:
+        errors.append('no process entries visible; procfs coverage cannot be established')
+    restart = any(r['status'] == 'RESTART_REQUIRED' for r in records)
+    incomplete = bool(errors or any(r['errors'] for r in records))
+    status = ('RESTART_REQUIRED' if restart else 'UNKNOWN' if incomplete else
+              'NO_STALE_FILES_FOUND' if records else 'NO_MATCHING_PROCESSES')
+    return {'status': status, 'records': records, 'errors': errors, 'vanished': raced}
+
+
+def package_cves(source, version, state='installed'):
+    findings = {}
+    for cve, rule in CVE_RULES.items():
+        status, reason = classify(source, version, cve)
+        if state != 'installed':
+            status, reason = 'UNKNOWN', 'incomplete dpkg installation: ' + state
+        findings[cve] = {'status': status, 'reason': reason, 'reference': rule['reference']}
+    return findings
+
+
+def aggregate_status(statuses):
+    statuses = list(statuses)
+    if 'UPDATE' in statuses:
+        return 'UPDATE'
+    if not statuses or 'UNKNOWN' in statuses:
+        return 'UNKNOWN'
+    return 'FIXED'
+
+
+def collect_report(scan_roots):
+    for executable in ('dpkg', 'dpkg-query', 'apt-cache', 'apt-mark'):
+        if not shutil.which(executable):
+            raise RuntimeError('Missing command: ' + executable + '; Debian 12 or 13 is required')
+    system = {}
+    for line in Path('/etc/os-release').read_text().splitlines():
+        if '=' in line:
+            key, value = line.split('=', 1)
+            system[key] = value.strip('"')
+    if system.get('ID') != 'debian' or system.get('VERSION_ID') not in ('12', '13'):
+        raise RuntimeError('This script supports Debian 12 and 13')
+    rows = inventory()
+    hold_result = run(['apt-mark', 'showhold'])
+    if hold_result.returncode:
+        raise RuntimeError('Could not list held packages')
+    holds = set(hold_result.stdout.splitlines())
+    available = candidates([r[1] for r in rows]) if rows else {}
+    packages, recommended = [], []
+    for state, name, version, source, source_version in rows:
+        findings = package_cves(source, source_version, state)
+        status = aggregate_status(f['status'] for f in findings.values())
+        held = name in holds or name.split(':')[0] in holds
+        candidate = available[name]
+        candidate_findings = package_cves(source, candidate) if candidate != '(none)' else {}
+        if (status != 'FIXED' and not held and candidate_findings and
+                all(f['status'] == 'FIXED' for f in candidate_findings.values()) and
+                candidate != version and ge(candidate, version)):
+            recommended.append(name)
+        packages.append({'name': name, 'installed_version': version, 'source_package': source,
+                         'source_version': source_version, 'dpkg_state': state, 'held': held,
+                         'status': status, 'cves': findings,
+                         'candidate': {'version': None if candidate == '(none)' else candidate,
+                                       'cves': candidate_findings}})
+    roots = ['/usr/bin', '/usr/sbin', '/usr/lib/cgi-bin', '/usr/lib/apache2/modules',
+             '/usr/local', '/opt', *scan_roots]
+    extra, scan_errors = extra_runtimes(roots, {r[1].split(':')[0] for r in rows})
+    for root in scan_roots:
+        if not os.path.isdir(root):
+            scan_errors.append('Requested scan root is not an accessible directory: ' + root)
+    processes = inspect_processes()
+    package_counts = {s: sum(p['status'] == s for p in packages) for s in ('FIXED', 'UPDATE', 'UNKNOWN')}
+    cves = {}
+    for cve, rule in CVE_RULES.items():
+        statuses = [p['cves'][cve]['status'] for p in packages]
+        cves[cve] = {'status': aggregate_status(statuses), 'scope': 'installed_package_metadata',
+                     'counts': {s: statuses.count(s) for s in ('FIXED', 'UPDATE', 'UNKNOWN')},
+                     'reference': rule['reference']}
+    cves[NOTICE['cve']] = {**NOTICE, 'scope': 'advisory_only'}
+    package_unknown = not packages or package_counts['UNKNOWN'] > 0 or bool(extra or scan_errors)
+    package_exit = 2 if package_unknown else 1 if package_counts['UPDATE'] else 0
+    restart_pids = [p['pid'] for p in processes['records'] if p['status'] == 'RESTART_REQUIRED']
+    process_unknown = bool(processes['errors'] or any(p['errors'] for p in processes['records']))
+    process_exit = 2 if process_unknown else 1 if restart_pids else 0
+    # The supplemental advisory is deliberately not declared resolved by version checks.
+    review = [cve for cve, finding in cves.items() if finding['status'] == 'REVIEW']
+    exit_code = 2 if review or package_exit == 2 or process_exit == 2 else max(package_exit, process_exit)
+    return {
+        'schema_version': SCHEMA_VERSION, 'tool_version': VERSION,
+        'generated_at': datetime.now(timezone.utc).isoformat(), 'rules_verified_at': RULES_DATE,
+        'system': {'id': system['ID'], 'version': system['VERSION_ID'],
+                   'name': system.get('PRETTY_NAME', 'Debian')},
+        'cves': cves, 'packages': packages, 'processes': processes,
+        'coverage': {'scan_roots': roots, 'unassessed_runtimes': extra, 'scan_errors': scan_errors,
+                     'configuration': 'NOT_CHECKED', 'application_code': 'NOT_CHECKED',
+                     'containers_and_chroots': 'NOT_AUDITED', 'file_integrity': 'NOT_CHECKED',
+                     'process_scope': 'visible procfs snapshot; renamed/static embedded runtimes may be missed',
+                     'apt_indexes': 'local; freshness not verified'},
+        'actions': {'upgrade_packages': recommended, 'restart_pids': restart_pids,
+                    'simulation_argv': ['sudo', 'apt-get', '-s', 'install', '--only-upgrade', *recommended] if recommended else [],
+                    'upgrade_argv': ['sudo', 'apt-get', 'install', '--only-upgrade', *recommended] if recommended else []},
+        'summary': {'package_counts': package_counts, 'package_exit_code': package_exit,
+                    'process_exit_code': process_exit, 'review_required': review,
+                    'updates_required': bool(package_counts['UPDATE']),
+                    'restart_required': bool(restart_pids), 'exit_code': exit_code},
+        'errors': [],
+    }
+
+
+def render_text(report):
+    print('PHP2Shell Checker ' + report['tool_version'])
+    if report['errors']:
+        for error in report['errors']:
+            print('ERROR: ' + error)
+        return
+    print('System: ' + report['system']['name'])
+    print('Rules verified: ' + report['rules_verified_at'])
+    print('APT uses local indexes; run sudo apt update separately to refresh candidates.')
+    print('\nPer-CVE results:')
+    for cve, finding in report['cves'].items():
+        print(f"[{finding['status']}] {cve} ({finding['scope']})")
+        print('  Source: ' + finding['reference'])
+        if finding['status'] == 'REVIEW':
+            print('  ' + finding['reason'])
+            print('  Conditions: ' + '; '.join(finding['conditions']))
+            print('  ' + finding['recommendation'])
+            print('  ' + finding['assessment'])
+    for package in report['packages']:
+        print(f"\n[{package['status']}] {package['name']}  installed={package['installed_version']}" +
+              ('  HOLD' if package['held'] else ''))
+        for cve, finding in package['cves'].items():
+            print(f"  {cve}: {finding['status']} — {finding['reason']}")
+        candidate = package['candidate']
+        print('  Candidate: ' + (candidate['version'] or 'unavailable'))
+        for cve, finding in candidate['cves'].items():
+            print(f"    {cve}: {finding['status']} — {finding['reason']}")
+    print('\nPHP core package totals: ' + ', '.join(f'{s}={n}' for s, n in report['summary']['package_counts'].items()))
+    print('\nProcess scan: ' + report['processes']['status'])
+    for process in report['processes']['records']:
+        print(f"[{process['status']}] PID {process['pid']} {json.dumps(process['name'])} service={json.dumps(process['service'])}")
+        for item in process['evidence']:
+            print('  ' + item['type'] + ': ' + json.dumps(item['path']))
+        for error in process['errors']:
+            print('  UNKNOWN: ' + error)
+    for error in report['processes']['errors']:
+        print('  UNKNOWN: ' + error)
+    for path in report['coverage']['unassessed_runtimes']:
+        print('[UNKNOWN] outside assessed packages: ' + json.dumps(path))
+    for error in report['coverage']['scan_errors']:
+        print('[UNKNOWN] ' + error)
+    if report['actions']['upgrade_packages']:
+        print('\nSuggested commands (NOT executed; review simulation first):')
+        print(shlex.join(report['actions']['simulation_argv']))
+        print(shlex.join(report['actions']['upgrade_argv']))
+    print('\nResult: ' + ('REVIEW / INCOMPLETE' if report['summary']['exit_code'] == 2 else
+                            'ACTION REQUIRED' if report['summary']['exit_code'] else 'NO ACTION FOUND WITHIN SCOPE'))
+    print('Package status and restart findings remain actionable even when review is required.')
+    print('FIXED applies only to the named CVE and package metadata, not running code or file integrity.')
+    print('Process checks detect stale-file evidence, not runtime PHP versions or compromise.')
+    print('Configuration, application code, containers and chroots are not audited.')
+    print('Directory symlinks are not traversed; add target directories using --scan-root.')
+    print('Restart affected PHP-FPM/Apache/long-running workers after updating. Holds are never removed.')
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description='Read-only PHP2Shell audit for Debian 12 and 13')
+    parser.add_argument('--version', action='version', version='%(prog)s ' + VERSION)
+    parser.add_argument('--format', choices=('text', 'json'), default='text', help='output format (default: text)')
+    parser.add_argument('--scan-root', action='append', default=[], metavar='DIR',
+                        help='additional runtime search directory; repeatable')
+    args = parser.parse_args(argv)
+    try:
+        report = collect_report(args.scan_root)
+    except (RuntimeError, OSError, UnicodeError) as exc:
+        report = {'schema_version': SCHEMA_VERSION, 'tool_version': VERSION,
+                  'generated_at': datetime.now(timezone.utc).isoformat(), 'rules_verified_at': RULES_DATE,
+                  'system': None, 'cves': {}, 'packages': [], 'processes': None,
+                  'coverage': None, 'actions': None, 'summary': {'exit_code': 2}, 'errors': [str(exc)]}
+    if args.format == 'json':
+        print(json.dumps(report, indent=2, ensure_ascii=True))
+    else:
+        render_text(report)
+    return report['summary']['exit_code']
+
+
+if __name__ == '__main__':
+    sys.exit(main())

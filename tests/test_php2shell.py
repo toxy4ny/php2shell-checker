@@ -1,6 +1,7 @@
 import contextlib
 import importlib.util
 import io
+import json
 from pathlib import Path
 import subprocess
 import shutil
@@ -26,9 +27,13 @@ class AuditTests(unittest.TestCase):
                  patch.object(a, 'classify', return_value=(status, 'test fixture')), \
                  patch.object(a, 'candidates', return_value={'php8.4-cli': '(none)'}), \
                  patch.object(a, 'extra_runtimes', return_value=([], [])), \
+                 patch.object(a, 'inspect_processes', return_value={'status': 'NO_MATCHING_PROCESSES', 'records': [], 'errors': [], 'vanished': 0}), \
                  patch.object(a, 'run', return_value=subprocess.CompletedProcess([], 0, '', '')), \
                  patch('sys.argv', ['check-php2shell.py']), contextlib.redirect_stdout(io.StringIO()):
-                self.assertEqual(a.main(), expected)
+                report = a.collect_report([])
+                self.assertEqual(report['summary']['package_exit_code'], expected)
+                self.assertEqual(report['summary']['exit_code'], 2)
+                self.assertEqual(report['cves']['CVE-2026-115560']['status'], 'REVIEW')
 
     @unittest.skipUnless(shutil.which('dpkg'), 'requires real dpkg (Debian CI)')
     def test_real_dpkg_release_boundaries(self):
@@ -119,6 +124,7 @@ class AuditTests(unittest.TestCase):
              patch.object(a, 'candidates', return_value={'php8.2-fpm': '8.2.35-1~deb12u1',
                  'php8.2-cli': '8.2.35-1~deb12u1', 'php8.1-fpm': '(none)'}), \
              patch.object(a, 'extra_runtimes', return_value=([], [])), \
+                 patch.object(a, 'inspect_processes', return_value={'status': 'NO_MATCHING_PROCESSES', 'records': [], 'errors': [], 'vanished': 0}), \
              patch.object(a, 'run', side_effect=run), patch.object(a, 'ge', side_effect=comparison), \
              patch('sys.argv', ['check-php2shell.py']), contextlib.redirect_stdout(output):
             self.assertEqual(a.main(), 2)

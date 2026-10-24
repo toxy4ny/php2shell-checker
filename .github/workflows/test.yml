@@ -2,6 +2,8 @@ name: Tests
 on: [push, pull_request, workflow_dispatch]
 permissions:
   contents: read
+env:
+  DEBIAN_FRONTEND: noninteractive
 jobs:
   debian:
     runs-on: ubuntu-latest

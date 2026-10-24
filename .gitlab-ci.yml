@@ -1,4 +1,6 @@
 stages: [test]
+variables:
+  DEBIAN_FRONTEND: noninteractive
 debian:
   stage: test
   image: debian:${RELEASE}-slim
