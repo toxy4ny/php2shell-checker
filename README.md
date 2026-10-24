@@ -1,5 +1,12 @@
 # PHP2Shell Checker
 
+[![Tests on GitHub Actions](https://github.com/toxy4ny/php2shell-checker/actions/workflows/test.yml/badge.svg?branch=main)](https://github.com/toxy4ny/php2shell-checker/actions/workflows/test.yml?query=branch%3Amain)
+
+**CI status:** tests run on [GitHub Actions](https://github.com/toxy4ny/php2shell-checker/actions/workflows/test.yml)
+for Debian 12 and 13. The badge above shows the `main` branch status; open a workflow
+run to see individual jobs and logs. [GitLab](https://gitlab.com/toxy4ny/php2shell-checker)
+currently serves as a source and release mirror, with GitLab CI disabled.
+
 A read-only PHP package audit for **Debian 12 (bookworm)** and **Debian 13 (trixie)**.
 Version **0.2.0** reports package results separately for **CVE-2026-109618** and
 **CVE-2026-109619**, inspects running processes for stale PHP files, and produces
@@ -34,7 +41,7 @@ sudo apt update
 sudo python3 check-php2shell.py
 ```
 
-Repositories: [GitHub](https://github.com/toxy4ny/php2shell-checker) · [GitLab](https://gitlab.com/toxy4ny/php2shell-checker)
+Repositories: [GitHub (primary)](https://github.com/toxy4ny/php2shell-checker) · [GitLab (mirror)](https://gitlab.com/toxy4ny/php2shell-checker)
 
 You can also download just `check-php2shell.py`, inspect it and run it locally.
 To include a custom installation directory:
@@ -200,9 +207,15 @@ python3 -m unittest discover -s tests -v
 Fixture tests run without Debian. On Debian, additional tests use real
 `dpkg --compare-versions` to cover release boundaries, prereleases, epochs and
 packaging revisions. Linux tests also exercise an actual deleted executable via
-procfs. CI is configured on GitHub and GitLab for both Debian releases, including
-text and JSON smoke checks with PHP installed. GitLab jobs require an account and
-runner configuration permitted to run CI. See [the changelog](CHANGELOG.md).
+procfs. [GitHub Actions](https://github.com/toxy4ny/php2shell-checker/actions/workflows/test.yml)
+runs the test suite on both Debian releases, including text and JSON smoke checks
+with PHP installed, on pushes, pull requests and manual workflow runs. Check the
+workflow run for the relevant commit or pull request when reviewing changes.
+
+GitLab is currently a source and release mirror. Its CI pipelines are disabled
+while GitLab-hosted CI requires account verification. Historical failed GitLab
+pipelines with an identity-verification error did not execute the tests; use
+GitHub Actions for the project's test status. See [the changelog](CHANGELOG.md).
 
 For changes to version rules, include a primary vendor advisory and a regression
 test. Please redact hostnames and sensitive paths from bug reports. Do not include

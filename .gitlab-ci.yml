@@ -1,3 +1,9 @@
+# GitLab is currently a mirror; GitHub Actions is the source of CI results.
+# Remove this workflow rule to re-enable GitLab CI when it is needed.
+workflow:
+  rules:
+    - when: never
+
 stages: [test]
 variables:
   DEBIAN_FRONTEND: noninteractive
