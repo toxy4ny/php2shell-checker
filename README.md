@@ -29,7 +29,7 @@ sudo apt update
 python3 check-php2shell.py
 ```
 
-GitLab mirror: https://gitlab.com/toxy4ny/php2shell-checker
+GitHub mirror: https://github.com/toxy4ny/php2shell-checker
 
 You can also download just `check-php2shell.py`, inspect it and run it locally.
 To include a custom installation directory:
